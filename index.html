@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pixel Art Converter</title>
+  <style>
+    :root{--panel-bg:#0f1720;--muted:#9aa6b2;--accent:#2dd4bf}
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial}
+    body{background:linear-gradient(180deg,#0b1116,#071019);color:#e6eef6;padding:18px 18px 8px 18px;box-sizing:border-box}
+    /* App layout */
+    .app{display:grid;grid-template-columns:320px 1fr;gap:18px;min-height:calc(100vh - 26px);align-items:start}
+    .panel{background:rgba(255,255,255,0.03);padding:14px;border-radius:10px;box-shadow:0 6px 18px rgba(2,6,23,0.6);display:flex;flex-direction:column}
+    .panel.left{overflow:auto;max-height:calc(100vh - 72px)}
+    .panel.right{height:calc(100vh - 72px);overflow:auto}
+
+    h2{margin:4px 0 12px;font-size:16px}
+    /* palette layout */
+    .palette-wrap{position:relative;padding:12px}
+    .palette{display:grid;grid-template-columns:repeat(8,1fr);gap:12px;margin-top:6px}
+    .swatch{width:100%;padding-bottom:100%;border-radius:8px;position:relative;cursor:pointer;border:3px solid rgba(255,255,255,0.03);box-shadow:inset 0 -8px rgba(0,0,0,0.28)}
+    .swatch.selected{outline:3px solid var(--accent);transform:scale(1.02)}
+    .controls{display:flex;flex-direction:column;gap:10px}
+    label{font-size:13px;color:var(--muted)}
+    input[type=range]{width:100%}
+    .row{display:flex;gap:8px;align-items:center}
+    .row > *{flex:1}
+    .upload-area{display:flex;flex-direction:column;gap:8px}
+    .upload-area input{display:none}
+    .btn{background:var(--accent);color:#002;display:inline-block;padding:8px 10px;border-radius:8px;border:none;cursor:pointer;font-weight:600}
+    .secondary{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted)}
+    .canvas-row{display:flex;gap:18px;align-items:start}
+    .box{background:#071224;padding:12px;border-radius:8px;min-width:160px}
+    .meta{display:flex;gap:8px;align-items:center;justify-content:space-between}
+    canvas{background:#0a0f16;border-radius:6px;image-rendering:pixelated;max-width:100%;display:block}
+    .small{font-size:12px;color:var(--muted)}
+    .top-info{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:8px}
+    .result-area{display:flex;flex-direction:column;gap:8px;align-items:center}
+    .palette-actions{display:flex;gap:8px;margin-top:8px}
+    .notice{font-size:13px;color:#cbd5e1;margin-top:6px}
+    .footer-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
+    .muted-btn{background:transparent;border:1px solid rgba(255,255,255,0.04);padding:6px;border-radius:6px;color:var(--muted);cursor:pointer}
+    ul.small{margin:6px 0 0 18px}
+    @media (max-width:900px){.app{grid-template-columns:1fr;}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="panel left">
+      <h2>Palette & Options</h2>
+      <div class="controls">
+        <div>
+          <label>Available palette (click to include/exclude)</label>
+          <div class="palette-wrap">
+            <div id="palette" class="palette" aria-label="palette"></div>
+          </div>
+
+          <div class="palette-actions">
+            <button id="selectAll" class="btn secondary">Select All</button>
+            <button id="clearAll" class="btn secondary">Clear</button>
+          </div>
+
+          <div class="group-buttons" id="categoryButtons" style="margin-top:8px"></div>
+
+          <div class="notice">
+            <strong>Dithering styles:</strong>
+            <ul class="small">
+              <li><strong>None</strong> — direct color mapping (fastest).</li>
+              <li><strong>Ordered (Bayer)</strong> — produces patterned halftones; good for synthetic/artsy looks.</li>
+              <li><strong>Floyd–Steinberg / Jarvis / Stucki / Burkes</strong> — error-diffusion methods that distribute quantization error; smoother gradients.</li>
+              <li><strong>Sierra family (Sierra, Sierra-3, Sierra-2, Sierra-Lite)</strong> — similar to Jarvis with different spread/strength (try them to compare).</li>
+              <li><strong>Atkinson</strong> — lighter diffusion often used in retro graphics.</li>
+              <li><strong>Random</strong> — adds noise to reduce banding, quick and sometimes pleasing.</li>
+            </ul>
+            <div style="height:6px"></div>
+            <strong>Pixel scale:</strong> lower values keep more detail; higher values make larger blocky pixels and are faster to process. Try increasing scale for an obvious 'pixel art' effect.
+          </div>
+
+        </div>
+
+        <div>
+          <label for="dither">Dithering</label>
+          <select id="dither">
+            <option value="none">None</option>
+            <option value="floyd">Floyd–Steinberg</option>
+            <option value="burkes">Burkes</option>
+            <option value="jarvis">Jarvis</option>
+            <option value="stucki">Stucki</option>
+            <option value="sierra">Sierra (full)</option>
+            <option value="sierra3">Sierra-3</option>
+            <option value="sierra2">Sierra-2</option>
+            <option value="sierralite">Sierra–Lite</option>
+            <option value="atkinson">Atkinson</option>
+            <option value="bayer2">Bayer 2x2</option>
+            <option value="bayer4">Bayer 4x4</option>
+            <option value="ordered">Ordered (Bayer 8x8)</option>
+            <option value="random">Random noise</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="pixelScale">Pixel scale (1 = most detailed, higher = bigger blocks)</label>
+          <input id="pixelScale" type="range" min="1" max="48" value="8">
+          <div class="small">Current reduction factor: <span id="pixelScaleVal">8</span></div>
+        </div>
+
+        <div>
+          <label for="displayScale">Result display scale (visual zoom)</label>
+          <input id="displayScale" type="range" min="1" max="48" value="8">
+          <div class="small">Display scale: <span id="displayScaleVal">8</span>x</div>
+        </div>
+
+        <div>
+          <label>Preview options</label>
+          <div class="row">
+            <label class="small"><input id="showGrid" type="checkbox"> Show grid (pixel borders)</label>
+          </div>
+        </div>
+
+        <div class="footer-actions">
+          <button id="downloadBtn" class="btn">Download Result</button>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="panel right">
+      <div class="upload-area">
+        <div class="top-info">
+          <div>
+            <strong>Upload an image</strong>
+            <div class="small">PNG, JPG, GIF — max practical size ~3000px</div>
+          </div>
+          <div>
+            <label class="btn" for="fileInput">Choose file</label>
+            <input id="fileInput" type="file" accept="image/*">
+          </div>
+        </div>
+
+        <div class="canvas-row">
+          <div style="flex:1;min-width:220px;">
+            <div class="box">
+              <div class="meta"><strong>Original</strong><span id="origSize" class="small">—</span></div>
+              <canvas id="origCanvas" title="Click to choose a new image" style="cursor:pointer"></canvas>
+            </div>
+          </div>
+
+          <div style="flex:1;min-width:220px;">
+            <div class="box result-area">
+              <div style="width:100%">
+                <div class="meta"><strong>Result</strong>
+                  <div style="display:flex;gap:8px;align-items:center">
+                    <div id="resultSize" class="small">—</div>
+                    <div id="pixelCount" class="small">—</div>
+                  </div>
+                </div>
+                <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+                  <label class="small">Scale:</label>
+                  <input id="displayScaleInput" type="number" min="1" max="48" value="8" style="width:72px;padding:6px;border-radius:6px;border:none;background:#071224;color:#dbeafe">
+                </div>
+              </div>
+
+              <canvas id="resultCanvas"></canvas>
+              <div class="small" style="margin-top:6px">Right-click the result to save or use the Download button.</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // Palette provided by user
+  const PALETTE = [
+"#000000","#3c3c3c","#787878","#aaaaaa","#d2d2d2","#ffffff",
+"#600018","#a50e1e","#ed1c24","#fa8072","#e45c1a","#ff7f27",
+"#f6aa09","#f9dd3b","#fffabc","#9c8431","#c5ad31","#e8d45f",
+"#4a6b3a","#5a944a","#84c573","#0eb968","#13e67b","#87ff5e",
+"#0c816e","#10aea6","#13e1be","#0f799f","#60f7f2","#bbfaf2",
+"#28509e","#4093e4","#7dc7ff","#4d31b8","#6b50f6","#99b1fb",
+"#4a4284","#7a71c4","#b5aef1","#780c99","#aa38b9","#e09ff9",
+"#cb007a","#ec1f80","#f38da9","#9b5249","#d18078","#fab6a4",
+"#684634","#95682a","#dba463","#7b6352","#9c846b","#d6b594",
+"#d18051","#f8b277","#ffc5a5","#6d643f","#948c6b","#cdc59e",
+"#333941","#6d758d","#b3b9d1"
+  ];
+
+  // DOM
+  const paletteEl = document.getElementById('palette');
+  const selectAll = document.getElementById('selectAll');
+  const clearAll = document.getElementById('clearAll');
+  const ditherSelect = document.getElementById('dither');
+  const pixelScaleInput = document.getElementById('pixelScale');
+  const pixelScaleVal = document.getElementById('pixelScaleVal');
+  const displayScale = document.getElementById('displayScale');
+  const displayScaleVal = document.getElementById('displayScaleVal');
+  const displayScaleInput = document.getElementById('displayScaleInput');
+  const showGrid = document.getElementById('showGrid');
+  const fileInput = document.getElementById('fileInput');
+  const origCanvas = document.getElementById('origCanvas');
+  const resultCanvas = document.getElementById('resultCanvas');
+  const origSize = document.getElementById('origSize');
+  const resultSize = document.getElementById('resultSize');
+  const pixelCount = document.getElementById('pixelCount');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const categoryButtons = document.getElementById('categoryButtons');
+
+  // Canvas contexts and reusable canvases
+  const origCtx = origCanvas.getContext('2d');
+  const resultCtx = resultCanvas.getContext('2d');
+  const work = document.createElement('canvas');
+  const tmp = document.createElement('canvas');
+  let workCtx = work.getContext('2d');
+  let tmpCtx = tmp.getContext('2d');
+
+  let img = new Image();
+  let imgLoaded = false;
+
+  // palette state
+  const paletteState = PALETTE.map(c => ({hex:c, active:true, rgb:hexToRgb(c)}));
+  const COLUMNS = 8;
+
+  // caching for nearest color lookups
+  const colorCache = new Map();
+
+  function buildPaletteUI(){
+    paletteEl.innerHTML = '';
+    paletteState.forEach((p, i) => {
+      const d = document.createElement('div');
+      d.className = 'swatch' + (p.active ? ' selected' : '');
+      d.title = p.hex;
+      d.style.background = p.hex;
+      d.dataset.index = i;
+      d.addEventListener('click', () => {
+        p.active = !p.active;
+        d.classList.toggle('selected', p.active);
+        colorCache.clear(); // palette changed -> clear cache
+        scheduleUpdate();
+      });
+      paletteEl.appendChild(d);
+    });
+  }
+
+  function buildCategoryButtons(){
+    const cats = [
+      {id:'neutrals', label:'Neutrals'},
+      {id:'reds', label:'Reds'},
+      {id:'oranges', label:'Oranges'},
+      {id:'yellows', label:'Yellows'},
+      {id:'greens', label:'Greens'},
+      {id:'cyans', label:'Cyans'},
+      {id:'blues', label:'Blues'},
+      {id:'purples', label:'Purples'},
+      {id:'pinks', label:'Pinks'},
+      {id:'browns', label:'Browns'}
+    ];
+    categoryButtons.innerHTML='';
+    cats.forEach(cat=>{
+      const btn = document.createElement('button');
+      btn.className='muted-btn'; btn.textContent=cat.label;
+      btn.addEventListener('click', ()=>toggleCategory(cat.id));
+      categoryButtons.appendChild(btn);
+    });
+  }
+
+  selectAll.addEventListener('click', ()=>{paletteState.forEach(p=>p.active=true); colorCache.clear(); buildPaletteUI(); scheduleUpdate();});
+  clearAll.addEventListener('click', ()=>{paletteState.forEach(p=>p.active=false); colorCache.clear(); buildPaletteUI(); scheduleUpdate();});
+
+  // debounce updates from continuous controls
+  let debounceTimer = null;
+  function debounceSchedule(){ clearTimeout(debounceTimer); debounceTimer = setTimeout(()=>scheduleUpdate(), 120); }
+
+  pixelScaleInput.addEventListener('input', ()=>{pixelScaleVal.textContent = pixelScaleInput.value; debounceSchedule();});
+  displayScale.addEventListener('input', ()=>{displayScaleVal.textContent = displayScale.value; displayScaleInput.value = displayScale.value; debounceSchedule();});
+  displayScaleInput.addEventListener('change', ()=>{let v = Math.max(1,Math.min(48,Number(displayScaleInput.value)||1));displayScaleInput.value=v;displayScale.value=v;displayScaleVal.textContent=v; scheduleUpdate();});
+  showGrid.addEventListener('change', scheduleUpdate);
+  ditherSelect.addEventListener('change', scheduleUpdate);
+
+  fileInput.addEventListener('change', (e)=>{
+    if(!e.target.files || !e.target.files[0]) return;
+    const f = e.target.files[0];
+    const url = URL.createObjectURL(f);
+    loadImage(url);
+  });
+
+  downloadBtn.addEventListener('click', ()=>{
+    if(!imgLoaded) return;
+    const a = document.createElement('a');
+    a.href = resultCanvas.toDataURL('image/png');
+    a.download = 'pixel-art.png';
+    a.click();
+  });
+
+  // clicking original canvas opens upload dialog (no URL prompt)
+  origCanvas.addEventListener('click', ()=>{ fileInput.click(); });
+
+  function loadImage(src){
+    imgLoaded = false;
+    img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = ()=>{
+      imgLoaded = true;
+      // cap original canvas preview size
+      const maxDisplay = 600;
+      const scale = Math.min(1, maxDisplay / Math.max(img.width, img.height));
+      origCanvas.width = Math.round(img.width * scale);
+      origCanvas.height = Math.round(img.height * scale);
+      origCtx.clearRect(0,0,origCanvas.width,origCanvas.height);
+      origCtx.drawImage(img, 0, 0, origCanvas.width,origCanvas.height);
+      origSize.textContent = img.width + ' x ' + img.height;
+      scheduleUpdate(true);
+    };
+    img.onerror = ()=>{alert('Error loading image');}
+    img.src = src;
+  }
+
+  // Utilities
+  function hexToRgb(hex){
+    const h = hex.replace('#','');
+    return {r:parseInt(h.substring(0,2),16),g:parseInt(h.substring(2,4),16),b:parseInt(h.substring(4,6),16)};
+  }
+
+  function rgbToHsl(r,g,b){
+    r/=255;g/=255;b/=255; const max=Math.max(r,g,b), min=Math.min(r,g,b); let h=0,s=0,l=(max+min)/2; if(max===min) h=s=0; else{ const d=max-min; s = l>0.5?d/(2-max-min):d/(max+min); switch(max){case r: h=(g-b)/d + (g<b?6:0); break; case g: h=(b-r)/d + 2; break; case b: h=(r-g)/d + 4; break;} h/=6;} return {h:h*360,s,l};
+  }
+
+  function colorDist2(a,b){
+    const dr=a.r-b.r, dg=a.g-b.g, db=a.b-b.b; return dr*dr+dg*dg+db*db;
+  }
+
+  function nearestPaletteColor(r,g,b){
+    const key = (r<<16) | (g<<8) | b;
+    if(colorCache.has(key)) return colorCache.get(key);
+    const active = paletteState.filter(p=>p.active);
+    let bestRgb;
+    if(active.length===0){ // fallback
+      let best=PALETTE[0]; let bestd=Infinity; for(const ph of PALETTE){const pr=hexToRgb(ph);const d=colorDist2(pr,{r,g,b}); if(d<bestd){bestd=d;best=ph;}} bestRgb=hexToRgb(best);
+    } else {
+      let best = active[0]; let bestd=Infinity;
+      for(const p of active){ const d=colorDist2(p.rgb,{r,g,b}); if(d<bestd){bestd=d;best=p;} }
+      bestRgb = best.rgb;
+    }
+    colorCache.set(key, bestRgb);
+    return bestRgb;
+  }
+
+  // Dithering matrices and kernel definitions
+  const ORDERED_BAYER_2 = [[0,2],[3,1]];
+  const ORDERED_BAYER_4 = [
+    [0,  8,  2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1,  9],
+    [15,7, 13, 5]
+  ];
+  function generateBayer(n){ if(n===1) return [[0]]; const half=n/2; const small=generateBayer(half); const res = Array.from({length:n}, ()=>Array(n).fill(0)); for(let y=0;y<half;y++) for(let x=0;x<half;x++){ const v = small[y][x]; res[y][x] = 4*v; res[y][x+half] = 4*v + 2; res[y+half][x] = 4*v + 3; res[y+half][x+half] = 4*v + 1;} return res; }
+
+  // Sierra kernels
+  const SIERRA_FULL = [
+    {x:1,y:0,f:5/32},{x:2,y:0,f:3/32},
+    {x:-2,y:1,f:2/32},{x:-1,y:1,f:4/32},{x:0,y:1,f:5/32},{x:1,y:1,f:4/32},{x:2,y:1,f:2/32},
+    {x:-1,y:2,f:2/32},{x:0,y:2,f:3/32},{x:1,y:2,f:2/32}
+  ];
+  // Sierra-3 (three-row reduced) - common variant
+  const SIERRA_3 = [
+    {x:1,y:0,f:4/16},{x:2,y:0,f:3/16},
+    {x:-2,y:1,f:1/16},{x:-1,y:1,f:2/16},{x:0,y:1,f:3/16},{x:1,y:1,f:2/16},{x:2,y:1,f:1/16},
+    {x:-1,y:2,f:1/16},{x:0,y:2,f:2/16},{x:1,y:2,f:1/16}
+  ];
+  // Sierra-2 (two-row)
+  const SIERRA_2 = [
+    {x:1,y:0,f:4/16},{x:2,y:0,f:3/16},
+    {x:-1,y:1,f:1/16},{x:0,y:1,f:2/16},{x:1,y:1,f:1/16}
+  ];
+  const SIERRA_LITE_KERNEL = [ {x:1,y:0,f:2/4}, {x:-1,y:1,f:1/4}, {x:0,y:1,f:1/4} ];
+
+  // main processing
+  let updateToken = 0;
+  function scheduleUpdate(forceImmediate){
+    const t = ++updateToken;
+    if(forceImmediate) processImage(t); else requestAnimationFrame(()=>processImage(t));
+  }
+
+  function processImage(tok){
+    if(tok !== updateToken) return;
+    if(!imgLoaded) return;
+
+    const factor = Math.max(1, parseInt(pixelScaleInput.value,10));
+    const targetW = Math.max(1, Math.floor(img.width / factor));
+    const targetH = Math.max(1, Math.floor(img.height / factor));
+
+    // reuse work & tmp canvases
+    work.width = targetW; work.height = targetH; workCtx = work.getContext('2d');
+    workCtx.drawImage(img, 0, 0, targetW, targetH);
+    const src = workCtx.getImageData(0,0,targetW,targetH);
+    const dst = workCtx.createImageData(targetW,targetH);
+
+    const method = ditherSelect.value;
+
+    if(method === 'none'){
+      for(let i=0;i<src.data.length;i+=4){
+        const r=src.data[i],g=src.data[i+1],b=src.data[i+2];
+        const col = nearestPaletteColor(r,g,b);
+        dst.data[i]=col.r;dst.data[i+1]=col.g;dst.data[i+2]=col.b;dst.data[i+3]=255;
+      }
+    } else if(method === 'bayer2' || method === 'bayer4' || method === 'ordered'){
+      let matrix;
+      if(method==='bayer2') matrix = ORDERED_BAYER_2;
+      else if(method==='bayer4') matrix = ORDERED_BAYER_4;
+      else matrix = generateBayer(8);
+      const n = matrix.length; const denom = n*n;
+      for(let y=0;y<targetH;y++){
+        for(let x=0;x<targetW;x++){
+          const idx = (y*targetW + x)*4;
+          const r=src.data[idx],g=src.data[idx+1],b=src.data[idx+2];
+          const tval = (matrix[y % n][x % n] + 0.5)/denom - 0.5;
+          const offset = Math.round(tval * 255);
+          const nr = clamp(r + offset,0,255);
+          const ng = clamp(g + offset,0,255);
+          const nb = clamp(b + offset,0,255);
+          const col = nearestPaletteColor(nr,ng,nb);
+          dst.data[idx]=col.r; dst.data[idx+1]=col.g; dst.data[idx+2]=col.b; dst.data[idx+3]=255;
+        }
+      }
+    } else if(method === 'random'){
+      for(let i=0;i<src.data.length;i+=4){
+        const r=src.data[i],g=src.data[i+1],b=src.data[i+2];
+        const noise = (Math.random()-0.5)*64;
+        const col = nearestPaletteColor(clamp(Math.round(r+noise),0,255), clamp(Math.round(g+noise),0,255), clamp(Math.round(b+noise),0,255));
+        dst.data[i]=col.r; dst.data[i+1]=col.g; dst.data[i+2]=col.b; dst.data[i+3]=255;
+      }
+    } else {
+      // error-diffusion family
+      const W = targetW, H = targetH;
+      const rbuf = new Float32Array(W*H);
+      const gbuf = new Float32Array(W*H);
+      const bbuf = new Float32Array(W*H);
+      for(let y=0;y<H;y++){
+        for(let x=0;x<W;x++){
+          const i = y*W + x; const idx = i*4;
+          rbuf[i]=src.data[idx]; gbuf[i]=src.data[idx+1]; bbuf[i]=src.data[idx+2];
+        }
+      }
+      let kernel;
+      if(method === 'floyd'){
+        kernel = [ {x:1,y:0,f:7/16},{x:-1,y:1,f:3/16},{x:0,y:1,f:5/16},{x:1,y:1,f:1/16} ];
+      } else if(method === 'burkes'){
+        kernel = [ {x:1,y:0,f:8/32},{x:2,y:0,f:4/32},{x:-2,y:1,f:2/32},{x:-1,y:1,f:4/32},{x:0,y:1,f:8/32},{x:1,y:1,f:4/32},{x:2,y:1,f:2/32} ];
+      } else if(method === 'jarvis'){
+        kernel = [ {x:1,y:0,f:7/48},{x:2,y:0,f:5/48},{x:-2,y:1,f:3/48},{x:-1,y:1,f:5/48},{x:0,y:1,f:7/48},{x:1,y:1,f:5/48},{x:2,y:1,f:3/48},{x:-2,y:2,f:1/48},{x:-1,y:2,f:3/48},{x:0,y:2,f:5/48},{x:1,y:2,f:3/48},{x:2,y:2,f:1/48} ];
+      } else if(method === 'stucki'){
+        kernel = [ {x:1,y:0,f:8/42},{x:2,y:0,f:4/42},{x:-2,y:1,f:2/42},{x:-1,y:1,f:4/42},{x:0,y:1,f:8/42},{x:1,y:1,f:4/42},{x:2,y:1,f:2/42},{x:-2,y:2,f:1/42},{x:-1,y:2,f:2/42},{x:0,y:2,f:4/42},{x:1,y:2,f:2/42},{x:2,y:2,f:1/42} ];
+      } else if(method === 'atkinson'){
+        kernel = [ {x:1,y:0,f:1/8},{x:2,y:0,f:1/8},{x:-1,y:1,f:1/8},{x:0,y:1,f:1/8},{x:1,y:1,f:1/8},{x:0,y:2,f:1/8} ];
+      } else if(method === 'sierra'){
+        kernel = SIERRA_FULL;
+      } else if(method === 'sierra3'){
+        kernel = SIERRA_3;
+      } else if(method === 'sierra2'){
+        kernel = SIERRA_2;
+      } else if(method === 'sierralite'){
+        kernel = SIERRA_LITE_KERNEL;
+      } else {
+        kernel = [ {x:1,y:0,f:7/16},{x:-1,y:1,f:3/16},{x:0,y:1,f:5/16},{x:1,y:1,f:1/16} ];
+      }
+
+      for(let y=0;y<H;y++){
+        for(let x=0;x<W;x++){
+          const i = y*W + x;
+          const old = {r: rbuf[i], g: gbuf[i], b: bbuf[i]};
+          const nq = nearestPaletteColor(Math.round(old.r), Math.round(old.g), Math.round(old.b));
+          dst.data[i*4]=nq.r; dst.data[i*4+1]=nq.g; dst.data[i*4+2]=nq.b; dst.data[i*4+3]=255;
+          const err = {r: old.r - nq.r, g: old.g - nq.g, b: old.b - nq.b};
+          for(const k of kernel){
+            const nx = x + k.x, ny = y + k.y;
+            if(nx<0||ny<0||nx>=W||ny>=H) continue;
+            const ni = ny*W + nx;
+            rbuf[ni] += err.r * k.f;
+            gbuf[ni] += err.g * k.f;
+            bbuf[ni] += err.b * k.f;
+          }
+        }
+      }
+    }
+
+    // draw result canvas scaled up by display scale
+    const scale = Math.max(1, parseInt(displayScale.value,10));
+    resultCanvas.width = targetW * scale; resultCanvas.height = targetH * scale;
+    tmp.width = targetW; tmp.height = targetH; tmpCtx = tmp.getContext('2d'); tmpCtx.putImageData(dst,0,0);
+    resultCtx.clearRect(0,0,resultCanvas.width,resultCanvas.height);
+    resultCtx.imageSmoothingEnabled = false;
+    resultCtx.drawImage(tmp, 0, 0, resultCanvas.width, resultCanvas.height);
+
+    if(showGrid.checked && scale>1){
+      resultCtx.save();
+      resultCtx.strokeStyle = 'rgba(0,0,0,0.35)';
+      resultCtx.lineWidth = 1;
+      for(let x=0;x<=resultCanvas.width; x+=scale){ resultCtx.beginPath(); resultCtx.moveTo(x+0.5,0); resultCtx.lineTo(x+0.5,resultCanvas.height); resultCtx.stroke(); }
+      for(let y=0;y<=resultCanvas.height; y+=scale){ resultCtx.beginPath(); resultCtx.moveTo(0,y+0.5); resultCtx.lineTo(resultCanvas.width,y+0.5); resultCtx.stroke(); }
+      resultCtx.restore();
+    }
+
+    resultSize.textContent = targetW + ' x ' + targetH;
+    pixelCount.textContent = (targetW * targetH) + ' pixels';
+
+    // redraw orig preview (keeps it in sync)
+    const maxDisplay = 600;
+    const scalePreview = Math.min(1, maxDisplay / Math.max(img.width, img.height));
+    origCanvas.width = Math.round(img.width * scalePreview);
+    origCanvas.height = Math.round(img.height * scalePreview);
+    origCtx.clearRect(0,0,origCanvas.width,origCanvas.height);
+    origCtx.drawImage(img, 0, 0, origCanvas.width,origCanvas.height);
+  }
+
+  // helpers
+  function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+
+  // Category toggles based on HSL (split browns from oranges)
+  function toggleCategory(cat){
+    paletteState.forEach(p=>{
+      const hsl = rgbToHsl(p.rgb.r,p.rgb.g,p.rgb.b);
+      const catMatch = matchCategory(hsl);
+      if(catMatch===cat){ p.active = !p.active; }
+    }); colorCache.clear(); buildPaletteUI(); scheduleUpdate();
+  }
+
+  function matchCategory(hsl){
+    const {h,s,l} = hsl;
+    // Browns are often low-sat mid/dark yellows/oranges — test for them first
+    if(s < 0.6 && l < 0.65 && h >= 15 && h < 60) return 'browns';
+    if(s < 0.08 || l < 0.06 || l>0.94) return 'neutrals';
+    if(h >= 345 || h < 15) return 'reds';
+    if(h >=15 && h < 35) return 'oranges';
+    if(h >=35 && h < 70) return 'yellows';
+    if(h >=70 && h < 170) return 'greens';
+    if(h >=170 && h < 200) return 'cyans';
+    if(h >=200 && h < 260) return 'blues';
+    if(h >=260 && h < 300) return 'purples';
+    if(h >=300 && h < 345) return 'pinks';
+    return 'browns';
+  }
+
+  // initialize
+  buildPaletteUI(); buildCategoryButtons();
+  pixelScaleVal.textContent = pixelScaleInput.value;
+  displayScaleVal.textContent = displayScale.value;
+  displayScaleInput.value = displayScale.value;
+
+  // drag & drop support
+  document.body.addEventListener('dragover', (e)=>{e.preventDefault();});
+  document.body.addEventListener('drop', (e)=>{e.preventDefault(); if(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]){ fileInput.files = e.dataTransfer.files; const ev = new Event('change'); fileInput.dispatchEvent(ev); }});
+
+})();
+</script>
+</body>
+</html>
