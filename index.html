@@ -29,8 +29,8 @@
     .upload-area input{display:none}
     .btn{background:var(--accent);color:#002;display:inline-block;padding:8px 10px;border-radius:8px;border:none;cursor:pointer;font-weight:600}
     .secondary{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted)}
-    .canvas-row{display:flex;gap:18px;align-items:start}
-    .box{background:#071224;padding:12px;border-radius:8px;min-width:160px}
+    .canvas-row{display:flex;gap:18px;align-items:stretch}
+    .box{background:#071224;padding:12px;border-radius:8px;min-width:160px;display:flex;flex-direction:column}
     .meta{display:flex;gap:8px;align-items:center;justify-content:space-between}
     canvas{background:#0a0f16;border-radius:6px;image-rendering:pixelated;max-width:100%;display:block}
     .small{font-size:12px;color:var(--muted)}
@@ -41,6 +41,13 @@
     .footer-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
     .muted-btn{background:transparent;border:1px solid rgba(255,255,255,0.04);padding:6px;border-radius:6px;color:var(--muted);cursor:pointer}
     ul.small{margin:6px 0 0 18px}
+
+    /* processing overlay */
+    .overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+    .processing{pointer-events:auto;background:rgba(0,0,0,0.5);padding:10px 14px;border-radius:8px;display:flex;gap:10px;align-items:center}
+    .spinner{width:18px;height:18px;border-radius:50%;border:3px solid rgba(255,255,255,0.12);border-top-color:var(--accent);animation:spin 900ms linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
     @media (max-width:900px){.app{grid-template-columns:1fr;}}
   </style>
 </head>
@@ -66,14 +73,14 @@
             <strong>Dithering styles:</strong>
             <ul class="small">
               <li><strong>None</strong> — direct color mapping (fastest).</li>
-              <li><strong>Ordered (Bayer)</strong> — produces patterned halftones; good for synthetic/artsy looks.</li>
-              <li><strong>Floyd–Steinberg / Jarvis / Stucki / Burkes</strong> — error-diffusion methods that distribute quantization error; smoother gradients.</li>
-              <li><strong>Sierra family (Sierra, Sierra-3, Sierra-2, Sierra-Lite)</strong> — similar to Jarvis with different spread/strength (try them to compare).</li>
+              <li><strong>Ordered (Bayer)</strong> — patterned halftones; good for synthetic/artsy looks.</li>
+              <li><strong>Floyd–Steinberg / Jarvis / Stucki / Burkes</strong> — error-diffusion methods for smoother gradients.</li>
+              <li><strong>Sierra family</strong> — slightly different spreads; Sierra-3 & Sierra-2 added for finer control.</li>
               <li><strong>Atkinson</strong> — lighter diffusion often used in retro graphics.</li>
-              <li><strong>Random</strong> — adds noise to reduce banding, quick and sometimes pleasing.</li>
+              <li><strong>Random</strong> — adds noise to reduce banding.</li>
             </ul>
             <div style="height:6px"></div>
-            <strong>Pixel scale:</strong> lower values keep more detail; higher values make larger blocky pixels and are faster to process. Try increasing scale for an obvious 'pixel art' effect.
+            <strong>Pixel scale:</strong> lower values keep more detail; higher values make larger blocky pixels and are faster to process.
           </div>
 
         </div>
@@ -139,14 +146,16 @@
 
         <div class="canvas-row">
           <div style="flex:1;min-width:220px;">
-            <div class="box">
+            <div id="origBox" class="box">
               <div class="meta"><strong>Original</strong><span id="origSize" class="small">—</span></div>
-              <canvas id="origCanvas" title="Click to choose a new image" style="cursor:pointer"></canvas>
+              <div style="position:relative;flex:1;display:flex;align-items:center;justify-content:center">
+                <canvas id="origCanvas" title="Click to choose a new image" style="cursor:pointer;max-width:100%;"></canvas>
+              </div>
             </div>
           </div>
 
           <div style="flex:1;min-width:220px;">
-            <div class="box result-area">
+            <div id="resultBox" class="box result-area" style="position:relative">
               <div style="width:100%">
                 <div class="meta"><strong>Result</strong>
                   <div style="display:flex;gap:8px;align-items:center">
@@ -160,7 +169,11 @@
                 </div>
               </div>
 
-              <canvas id="resultCanvas"></canvas>
+              <div style="position:relative;flex:1;display:flex;align-items:center;justify-content:center">
+                <canvas id="resultCanvas"></canvas>
+                <div id="processingOverlay" class="overlay" style="display:none"><div class="processing"><div class="spinner"></div><div><div id="processingText">Processing…</div><div id="processingMode" style="font-size:11px;color:var(--muted)"></div></div></div></div>
+              </div>
+
               <div class="small" style="margin-top:6px">Right-click the result to save or use the Download button.</div>
             </div>
           </div>
@@ -206,6 +219,11 @@
   const pixelCount = document.getElementById('pixelCount');
   const downloadBtn = document.getElementById('downloadBtn');
   const categoryButtons = document.getElementById('categoryButtons');
+  const processingOverlay = document.getElementById('processingOverlay');
+  const processingText = document.getElementById('processingText');
+  const processingMode = document.getElementById('processingMode');
+  const origBox = document.getElementById('origBox');
+  const resultBox = document.getElementById('resultBox');
 
   // Canvas contexts and reusable canvases
   const origCtx = origCanvas.getContext('2d');
@@ -220,10 +238,112 @@
 
   // palette state
   const paletteState = PALETTE.map(c => ({hex:c, active:true, rgb:hexToRgb(c)}));
-  const COLUMNS = 8;
 
   // caching for nearest color lookups
   const colorCache = new Map();
+
+  // Worker setup
+  let worker = null; let workerAvailable = false;
+  try{
+    const blob = new Blob([`(${workerFn.toString()})()`], {type:'application/javascript'});
+    const url = URL.createObjectURL(blob);
+    worker = new Worker(url);
+    workerAvailable = true;
+  } catch(e){ workerAvailable = false; console.warn('Worker unavailable', e); }
+
+  if(worker){
+    worker.onmessage = function(e){
+      const msg = e.data;
+      if(msg && msg.type === 'result'){
+        // re-create image data from transferred buffer
+        try{
+          const w = msg.width, h = msg.height;
+          const imgData = new ImageData(new Uint8ClampedArray(msg.data), w, h);
+          // putImageData into tmp and draw
+          tmp.width = w; tmp.height = h; tmpCtx = tmp.getContext('2d');
+          tmpCtx.putImageData(imgData, 0, 0);
+          drawResultFromTmp(w,h);
+        } catch(err){
+          console.error('Error applying worker result', err);
+          alert('Rendering failed after worker processing. Try increasing pixel scale or display scale.');
+        } finally{
+          setProcessing(false);
+        }
+      }
+    };
+  }
+
+  // processing overlay control
+  function setProcessing(on, mode){
+    if(on){
+      processingOverlay.style.display = 'flex';
+      processingText.textContent = 'Processing…';
+      processingMode.textContent = mode ? `Mode: ${mode}` : '';
+    } else { processingOverlay.style.display = 'none'; processingMode.textContent = ''; }
+  }
+
+  function drawResultFromTmp(targetW, targetH){
+    // draw scaled for display and update stats
+    const scale = Math.max(1, parseInt(displayScale.value,10));
+    // attempt to draw, but guard against too-large canvases: cap final canvas size
+    const MAX_DISPLAY_DIM = 8192; // conservative
+    let outW = targetW * scale, outH = targetH * scale;
+    let downscaleFactor = Math.max(1, Math.ceil(Math.max(outW / MAX_DISPLAY_DIM, outH / MAX_DISPLAY_DIM)));
+    if(downscaleFactor > 1){ outW = Math.floor(outW / downscaleFactor); outH = Math.floor(outH / downscaleFactor); }
+
+    resultCanvas.width = outW; resultCanvas.height = outH;
+    resultCtx.clearRect(0,0,outW,outH);
+    resultCtx.imageSmoothingEnabled = false;
+    try{
+      // drawImage may throw if source tmp is too large for GPU; catch and fallback
+      resultCtx.drawImage(tmp, 0, 0, outW, outH);
+    } catch(e){
+      console.warn('drawImage failed, attempting safe fallback', e);
+      // fallback: draw in smaller steps — draw at 1:1 if possible
+      try{
+        const smallW = Math.max(1, Math.floor(outW/2));
+        const smallH = Math.max(1, Math.floor(outH/2));
+        const small = document.createElement('canvas'); small.width = smallW; small.height = smallH;
+        const sctx = small.getContext('2d'); sctx.imageSmoothingEnabled=false; sctx.drawImage(tmp, 0, 0, smallW, smallH);
+        resultCtx.drawImage(small, 0, 0, outW, outH);
+      } catch(err){
+        console.error('Fallback draw failed', err);
+        resultCtx.fillStyle = '#111'; resultCtx.fillRect(0,0,outW,outH);
+      }
+    }
+
+    // grid
+    if(showGrid.checked && scale>1){
+      resultCtx.save(); resultCtx.strokeStyle='rgba(0,0,0,0.35)'; resultCtx.lineWidth=1;
+      const step = scale; for(let x=0;x<=resultCanvas.width; x+=step){ resultCtx.beginPath(); resultCtx.moveTo(x+0.5,0); resultCtx.lineTo(x+0.5,resultCanvas.height); resultCtx.stroke(); }
+      for(let y=0;y<=resultCanvas.height; y+=step){ resultCtx.beginPath(); resultCtx.moveTo(0,y+0.5); resultCtx.lineTo(resultCanvas.width,y+0.5); resultCtx.stroke(); }
+      resultCtx.restore();
+    }
+
+    // If we downscaled for display because of device limits, explain in overlay briefly
+    if(downscaleFactor>1){ processingMode.textContent = `Display capped (factor ${downscaleFactor}) — downloaded image remains ${targetW}×${targetH}`; }
+
+    resultSize.textContent = targetW + ' x ' + targetH;
+    pixelCount.textContent = (targetW * targetH) + ' pixels';
+
+    // sync preview sizes
+    syncBoxHeights();
+    setProcessing(false);
+  }
+
+  // equalize box heights for neat layout
+  function syncBoxHeights(){
+    // reset heights
+    origBox.style.height = '';
+    resultBox.style.height = '';
+    // measure
+    const o = origBox.getBoundingClientRect();
+    const r = resultBox.getBoundingClientRect();
+    const maxH = Math.max(o.height, r.height);
+    // leave small gap to bottom
+    origBox.style.height = Math.max(160, Math.floor(maxH)) + 'px';
+    resultBox.style.height = Math.max(160, Math.floor(maxH)) + 'px';
+  }
 
   function buildPaletteUI(){
     paletteEl.innerHTML = '';
@@ -286,10 +406,11 @@
   });
 
   downloadBtn.addEventListener('click', ()=>{
+    // download the 1:1 tmp canvas (target pixels) so it matches displayed pixel count
     if(!imgLoaded) return;
     const a = document.createElement('a');
-    a.href = resultCanvas.toDataURL('image/png');
-    a.download = 'pixel-art.png';
+    a.href = tmp.toDataURL('image/png');
+    a.download = 'pixel-art-1x.png';
     a.click();
   });
 
@@ -302,6 +423,8 @@
     img.crossOrigin = 'anonymous';
     img.onload = ()=>{
       imgLoaded = true;
+      // cache rgb values for palette
+      paletteState.forEach(p=>{p.rgb = hexToRgb(p.hex);});
       // cap original canvas preview size
       const maxDisplay = 600;
       const scale = Math.min(1, maxDisplay / Math.max(img.width, img.height));
@@ -330,52 +453,7 @@
     const dr=a.r-b.r, dg=a.g-b.g, db=a.b-b.b; return dr*dr+dg*dg+db*db;
   }
 
-  function nearestPaletteColor(r,g,b){
-    const key = (r<<16) | (g<<8) | b;
-    if(colorCache.has(key)) return colorCache.get(key);
-    const active = paletteState.filter(p=>p.active);
-    let bestRgb;
-    if(active.length===0){ // fallback
-      let best=PALETTE[0]; let bestd=Infinity; for(const ph of PALETTE){const pr=hexToRgb(ph);const d=colorDist2(pr,{r,g,b}); if(d<bestd){bestd=d;best=ph;}} bestRgb=hexToRgb(best);
-    } else {
-      let best = active[0]; let bestd=Infinity;
-      for(const p of active){ const d=colorDist2(p.rgb,{r,g,b}); if(d<bestd){bestd=d;best=p;} }
-      bestRgb = best.rgb;
-    }
-    colorCache.set(key, bestRgb);
-    return bestRgb;
-  }
-
-  // Dithering matrices and kernel definitions
-  const ORDERED_BAYER_2 = [[0,2],[3,1]];
-  const ORDERED_BAYER_4 = [
-    [0,  8,  2, 10],
-    [12, 4, 14, 6],
-    [3, 11, 1,  9],
-    [15,7, 13, 5]
-  ];
-  function generateBayer(n){ if(n===1) return [[0]]; const half=n/2; const small=generateBayer(half); const res = Array.from({length:n}, ()=>Array(n).fill(0)); for(let y=0;y<half;y++) for(let x=0;x<half;x++){ const v = small[y][x]; res[y][x] = 4*v; res[y][x+half] = 4*v + 2; res[y+half][x] = 4*v + 3; res[y+half][x+half] = 4*v + 1;} return res; }
-
-  // Sierra kernels
-  const SIERRA_FULL = [
-    {x:1,y:0,f:5/32},{x:2,y:0,f:3/32},
-    {x:-2,y:1,f:2/32},{x:-1,y:1,f:4/32},{x:0,y:1,f:5/32},{x:1,y:1,f:4/32},{x:2,y:1,f:2/32},
-    {x:-1,y:2,f:2/32},{x:0,y:2,f:3/32},{x:1,y:2,f:2/32}
-  ];
-  // Sierra-3 (three-row reduced) - common variant
-  const SIERRA_3 = [
-    {x:1,y:0,f:4/16},{x:2,y:0,f:3/16},
-    {x:-2,y:1,f:1/16},{x:-1,y:1,f:2/16},{x:0,y:1,f:3/16},{x:1,y:1,f:2/16},{x:2,y:1,f:1/16},
-    {x:-1,y:2,f:1/16},{x:0,y:2,f:2/16},{x:1,y:2,f:1/16}
-  ];
-  // Sierra-2 (two-row)
-  const SIERRA_2 = [
-    {x:1,y:0,f:4/16},{x:2,y:0,f:3/16},
-    {x:-1,y:1,f:1/16},{x:0,y:1,f:2/16},{x:1,y:1,f:1/16}
-  ];
-  const SIERRA_LITE_KERNEL = [ {x:1,y:0,f:2/4}, {x:-1,y:1,f:1/4}, {x:0,y:1,f:1/4} ];
-
-  // main processing
+  // main processing: worker or main-thread
   let updateToken = 0;
   function scheduleUpdate(forceImmediate){
     const t = ++updateToken;
@@ -387,136 +465,97 @@
     if(!imgLoaded) return;
 
     const factor = Math.max(1, parseInt(pixelScaleInput.value,10));
-    const targetW = Math.max(1, Math.floor(img.width / factor));
-    const targetH = Math.max(1, Math.floor(img.height / factor));
+    const targetW0 = Math.max(1, Math.floor(img.width / factor));
+    const targetH0 = Math.max(1, Math.floor(img.height / factor));
 
-    // reuse work & tmp canvases
+    // guard: cap target resolution to avoid browser canvas limits
+    const MAX_TARGET_DIM = 8192; // conservative cap
+    let scaleDown = Math.max(1, Math.ceil(Math.max(targetW0 / MAX_TARGET_DIM, targetH0 / MAX_TARGET_DIM)));
+    const targetW = Math.max(1, Math.floor(targetW0 / scaleDown));
+    const targetH = Math.max(1, Math.floor(targetH0 / scaleDown));
+
+    // draw scaled down into work canvas
     work.width = targetW; work.height = targetH; workCtx = work.getContext('2d');
+    workCtx.clearRect(0,0,work.width,work.height);
     workCtx.drawImage(img, 0, 0, targetW, targetH);
     const src = workCtx.getImageData(0,0,targetW,targetH);
-    const dst = workCtx.createImageData(targetW,targetH);
 
     const method = ditherSelect.value;
+    const activePalette = paletteState.filter(p=>p.active).map(p=>p.rgb);
 
+    // show processing indicator
+    setProcessing(true, workerAvailable ? 'worker' : 'main');
+
+    if(workerAvailable && worker){
+      try{
+        // transfer src buffer
+        worker.postMessage({type:'process', width:targetW, height:targetH, data:src.data.buffer, method, palette:activePalette}, [src.data.buffer]);
+        return;
+      } catch(e){
+        console.warn('Worker transfer failed, falling back to main thread', e);
+        // continue to main-thread
+      }
+    }
+
+    // fallback main-thread processing
+    const dst = workCtx.createImageData(targetW,targetH);
+    try{
+      mainThreadProcess(src.data, dst.data, targetW, targetH, method, activePalette);
+      tmp.width = targetW; tmp.height = targetH; tmpCtx = tmp.getContext('2d');
+      tmpCtx.putImageData(dst,0,0);
+      drawResultFromTmp(targetW,targetH);
+    } catch(err){
+      console.error('Main-thread processing failed', err);
+      alert('Processing failed — try increasing pixel scale to reduce target size.');
+      setProcessing(false);
+    }
+  }
+
+  // main-thread processing implementation
+  function mainThreadProcess(srcBuf, dstBuf, W, H, method, paletteRgb){
+    const palette = paletteRgb && paletteRgb.length ? paletteRgb : PALETTE.map(hexToRgb);
+    function nearest(r,g,b){ let best=null, bd=Infinity; for(const p of palette){ const d = (p.r-r)*(p.r-r)+(p.g-g)*(p.g-g)+(p.b-b)*(p.b-b); if(d<bd){bd=d;best=p;} } return best; }
     if(method === 'none'){
-      for(let i=0;i<src.data.length;i+=4){
-        const r=src.data[i],g=src.data[i+1],b=src.data[i+2];
-        const col = nearestPaletteColor(r,g,b);
-        dst.data[i]=col.r;dst.data[i+1]=col.g;dst.data[i+2]=col.b;dst.data[i+3]=255;
-      }
-    } else if(method === 'bayer2' || method === 'bayer4' || method === 'ordered'){
-      let matrix;
-      if(method==='bayer2') matrix = ORDERED_BAYER_2;
-      else if(method==='bayer4') matrix = ORDERED_BAYER_4;
-      else matrix = generateBayer(8);
-      const n = matrix.length; const denom = n*n;
-      for(let y=0;y<targetH;y++){
-        for(let x=0;x<targetW;x++){
-          const idx = (y*targetW + x)*4;
-          const r=src.data[idx],g=src.data[idx+1],b=src.data[idx+2];
-          const tval = (matrix[y % n][x % n] + 0.5)/denom - 0.5;
-          const offset = Math.round(tval * 255);
-          const nr = clamp(r + offset,0,255);
-          const ng = clamp(g + offset,0,255);
-          const nb = clamp(b + offset,0,255);
-          const col = nearestPaletteColor(nr,ng,nb);
-          dst.data[idx]=col.r; dst.data[idx+1]=col.g; dst.data[idx+2]=col.b; dst.data[idx+3]=255;
-        }
-      }
-    } else if(method === 'random'){
-      for(let i=0;i<src.data.length;i+=4){
-        const r=src.data[i],g=src.data[i+1],b=src.data[i+2];
-        const noise = (Math.random()-0.5)*64;
-        const col = nearestPaletteColor(clamp(Math.round(r+noise),0,255), clamp(Math.round(g+noise),0,255), clamp(Math.round(b+noise),0,255));
-        dst.data[i]=col.r; dst.data[i+1]=col.g; dst.data[i+2]=col.b; dst.data[i+3]=255;
-      }
-    } else {
-      // error-diffusion family
-      const W = targetW, H = targetH;
-      const rbuf = new Float32Array(W*H);
-      const gbuf = new Float32Array(W*H);
-      const bbuf = new Float32Array(W*H);
-      for(let y=0;y<H;y++){
-        for(let x=0;x<W;x++){
-          const i = y*W + x; const idx = i*4;
-          rbuf[i]=src.data[idx]; gbuf[i]=src.data[idx+1]; bbuf[i]=src.data[idx+2];
-        }
-      }
-      let kernel;
-      if(method === 'floyd'){
-        kernel = [ {x:1,y:0,f:7/16},{x:-1,y:1,f:3/16},{x:0,y:1,f:5/16},{x:1,y:1,f:1/16} ];
-      } else if(method === 'burkes'){
-        kernel = [ {x:1,y:0,f:8/32},{x:2,y:0,f:4/32},{x:-2,y:1,f:2/32},{x:-1,y:1,f:4/32},{x:0,y:1,f:8/32},{x:1,y:1,f:4/32},{x:2,y:1,f:2/32} ];
-      } else if(method === 'jarvis'){
-        kernel = [ {x:1,y:0,f:7/48},{x:2,y:0,f:5/48},{x:-2,y:1,f:3/48},{x:-1,y:1,f:5/48},{x:0,y:1,f:7/48},{x:1,y:1,f:5/48},{x:2,y:1,f:3/48},{x:-2,y:2,f:1/48},{x:-1,y:2,f:3/48},{x:0,y:2,f:5/48},{x:1,y:2,f:3/48},{x:2,y:2,f:1/48} ];
-      } else if(method === 'stucki'){
-        kernel = [ {x:1,y:0,f:8/42},{x:2,y:0,f:4/42},{x:-2,y:1,f:2/42},{x:-1,y:1,f:4/42},{x:0,y:1,f:8/42},{x:1,y:1,f:4/42},{x:2,y:1,f:2/42},{x:-2,y:2,f:1/42},{x:-1,y:2,f:2/42},{x:0,y:2,f:4/42},{x:1,y:2,f:2/42},{x:2,y:2,f:1/42} ];
-      } else if(method === 'atkinson'){
-        kernel = [ {x:1,y:0,f:1/8},{x:2,y:0,f:1/8},{x:-1,y:1,f:1/8},{x:0,y:1,f:1/8},{x:1,y:1,f:1/8},{x:0,y:2,f:1/8} ];
-      } else if(method === 'sierra'){
-        kernel = SIERRA_FULL;
-      } else if(method === 'sierra3'){
-        kernel = SIERRA_3;
-      } else if(method === 'sierra2'){
-        kernel = SIERRA_2;
-      } else if(method === 'sierralite'){
-        kernel = SIERRA_LITE_KERNEL;
-      } else {
-        kernel = [ {x:1,y:0,f:7/16},{x:-1,y:1,f:3/16},{x:0,y:1,f:5/16},{x:1,y:1,f:1/16} ];
-      }
+      for(let i=0;i<srcBuf.length;i+=4){ const r=srcBuf[i],g=srcBuf[i+1],b=srcBuf[i+2]; const c=nearest(r,g,b); dstBuf[i]=c.r; dstBuf[i+1]=c.g; dstBuf[i+2]=c.b; dstBuf[i+3]=255; }
+      return;
+    }
+    if(method === 'bayer2' || method === 'bayer4' || method === 'ordered'){
+      let matrix = method==='bayer2'?[[0,2],[3,1]]:method==='bayer4'?ORDERED_BAYER_4:generateBayer(8);
+      const n = matrix.length, denom = n*n;
+      for(let y=0;y<H;y++) for(let x=0;x<W;x++){ const idx=(y*W+x)*4; const r=srcBuf[idx],g=srcBuf[idx+1],b=srcBuf[idx+2]; const tval=(matrix[y%n][x%n]+0.5)/denom-0.5; const off=Math.round(tval*255); const nr=clamp(r+off,0,255), ng=clamp(g+off,0,255), nb=clamp(b+off,0,255); const c=nearest(nr,ng,nb); dstBuf[idx]=c.r; dstBuf[idx+1]=c.g; dstBuf[idx+2]=c.b; dstBuf[idx+3]=255; }
+      return;
+    }
+    if(method === 'random'){
+      for(let i=0;i<srcBuf.length;i+=4){ const r=srcBuf[i],g=srcBuf[i+1],b=srcBuf[i+2]; const noise=(Math.random()-0.5)*64; const c=nearest(clamp(Math.round(r+noise),0,255), clamp(Math.round(g+noise),0,255), clamp(Math.round(b+noise),0,255)); dstBuf[i]=c.r; dstBuf[i+1]=c.g; dstBuf[i+2]=c.b; dstBuf[i+3]=255; }
+      return;
+    }
+    // error diffusion
+    let kernel;
+    if(method === 'floyd') kernel=[{x:1,y:0,f:7/16},{x:-1,y:1,f:3/16},{x:0,y:1,f:5/16},{x:1,y:1,f:1/16}];
+    else if(method === 'burkes') kernel=[{x:1,y:0,f:8/32},{x:2,y:0,f:4/32},{x:-2,y:1,f:2/32},{x:-1,y:1,f:4/32},{x:0,y:1,f:8/32},{x:1,y:1,f:4/32},{x:2,y:1,f:2/32}];
+    else if(method === 'jarvis') kernel=[{x:1,y:0,f:7/48},{x:2,y:0,f:5/48},{x:-2,y:1,f:3/48},{x:-1,y:1,f:5/48},{x:0,y:1,f:7/48},{x:1,y:1,f:5/48},{x:2,y:1,f:3/48},{x:-2,y:2,f:1/48},{x:-1,y:2,f:3/48},{x:0,y:2,f:5/48},{x:1,y:2,f:3/48},{x:2,y:2,f:1/48}];
+    else if(method === 'stucki') kernel=[{x:1,y:0,f:8/42},{x:2,y:0,f:4/42},{x:-2,y:1,f:2/42},{x:-1,y:1,f:4/42},{x:0,y:1,f:8/42},{x:1,y:1,f:4/42},{x:2,y:1,f:2/42},{x:-2,y:2,f:1/42},{x:-1,y:2,f:2/42},{x:0,y:2,f:4/42},{x:1,y:2,f:2/42},{x:2,y:2,f:1/42}];
+    else if(method === 'atkinson') kernel=[{x:1,y:0,f:1/8},{x:2,y:0,f:1/8},{x:-1,y:1,f:1/8},{x:0,y:1,f:1/8},{x:1,y:1,f:1/8},{x:0,y:2,f:1/8}];
+    else if(method === 'sierra') kernel=SIERRA_FULL;
+    else if(method === 'sierra3') kernel=SIERRA_3;
+    else if(method === 'sierra2') kernel=SIERRA_2;
+    else if(method === 'sierralite') kernel=SIERRA_LITE_KERNEL;
+    else kernel=[{x:1,y:0,f:7/16},{x:-1,y:1,f:3/16},{x:0,y:1,f:5/16},{x:1,y:1,f:1/16}];
 
-      for(let y=0;y<H;y++){
-        for(let x=0;x<W;x++){
-          const i = y*W + x;
-          const old = {r: rbuf[i], g: gbuf[i], b: bbuf[i]};
-          const nq = nearestPaletteColor(Math.round(old.r), Math.round(old.g), Math.round(old.b));
-          dst.data[i*4]=nq.r; dst.data[i*4+1]=nq.g; dst.data[i*4+2]=nq.b; dst.data[i*4+3]=255;
-          const err = {r: old.r - nq.r, g: old.g - nq.g, b: old.b - nq.b};
-          for(const k of kernel){
-            const nx = x + k.x, ny = y + k.y;
-            if(nx<0||ny<0||nx>=W||ny>=H) continue;
-            const ni = ny*W + nx;
-            rbuf[ni] += err.r * k.f;
-            gbuf[ni] += err.g * k.f;
-            bbuf[ni] += err.b * k.f;
-          }
-        }
+    const rbuf = new Float32Array(W*H); const gbuf = new Float32Array(W*H); const bbuf = new Float32Array(W*H);
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++){ const i=y*W+x; const idx=i*4; rbuf[i]=srcBuf[idx]; gbuf[i]=srcBuf[idx+1]; bbuf[i]=srcBuf[idx+2]; }
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const i=y*W+x; const oldR=rbuf[i], oldG=gbuf[i], oldB=bbuf[i]; const c=nearest(Math.round(oldR), Math.round(oldG), Math.round(oldB)); dstBuf[i*4]=c.r; dstBuf[i*4+1]=c.g; dstBuf[i*4+2]=c.b; dstBuf[i*4+3]=255; const errR = oldR - c.r, errG = oldG - c.g, errB = oldB - c.b;
+        for(const k of kernel){ const nx=x+k.x, ny=y+k.y; if(nx<0||ny<0||nx>=W||ny>=H) continue; const ni=ny*W+nx; rbuf[ni]+=errR*k.f; gbuf[ni]+=errG*k.f; bbuf[ni]+=errB*k.f; }
       }
     }
-
-    // draw result canvas scaled up by display scale
-    const scale = Math.max(1, parseInt(displayScale.value,10));
-    resultCanvas.width = targetW * scale; resultCanvas.height = targetH * scale;
-    tmp.width = targetW; tmp.height = targetH; tmpCtx = tmp.getContext('2d'); tmpCtx.putImageData(dst,0,0);
-    resultCtx.clearRect(0,0,resultCanvas.width,resultCanvas.height);
-    resultCtx.imageSmoothingEnabled = false;
-    resultCtx.drawImage(tmp, 0, 0, resultCanvas.width, resultCanvas.height);
-
-    if(showGrid.checked && scale>1){
-      resultCtx.save();
-      resultCtx.strokeStyle = 'rgba(0,0,0,0.35)';
-      resultCtx.lineWidth = 1;
-      for(let x=0;x<=resultCanvas.width; x+=scale){ resultCtx.beginPath(); resultCtx.moveTo(x+0.5,0); resultCtx.lineTo(x+0.5,resultCanvas.height); resultCtx.stroke(); }
-      for(let y=0;y<=resultCanvas.height; y+=scale){ resultCtx.beginPath(); resultCtx.moveTo(0,y+0.5); resultCtx.lineTo(resultCanvas.width,y+0.5); resultCtx.stroke(); }
-      resultCtx.restore();
-    }
-
-    resultSize.textContent = targetW + ' x ' + targetH;
-    pixelCount.textContent = (targetW * targetH) + ' pixels';
-
-    // redraw orig preview (keeps it in sync)
-    const maxDisplay = 600;
-    const scalePreview = Math.min(1, maxDisplay / Math.max(img.width, img.height));
-    origCanvas.width = Math.round(img.width * scalePreview);
-    origCanvas.height = Math.round(img.height * scalePreview);
-    origCtx.clearRect(0,0,origCanvas.width,origCanvas.height);
-    origCtx.drawImage(img, 0, 0, origCanvas.width,origCanvas.height);
   }
 
   // helpers
   function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
 
-  // Category toggles based on HSL (split browns from oranges)
+  // category toggles
   function toggleCategory(cat){
     paletteState.forEach(p=>{
       const hsl = rgbToHsl(p.rgb.r,p.rgb.g,p.rgb.b);
@@ -524,34 +563,43 @@
       if(catMatch===cat){ p.active = !p.active; }
     }); colorCache.clear(); buildPaletteUI(); scheduleUpdate();
   }
+  function matchCategory(hsl){ const {h,s,l}=hsl; if(s<0.6&&l<0.65&&h>=15&&h<60) return 'browns'; if(s<0.08||l<0.06||l>0.94) return 'neutrals'; if(h>=345||h<15) return 'reds'; if(h>=15&&h<35) return 'oranges'; if(h>=35&&h<70) return 'yellows'; if(h>=70&&h<170) return 'greens'; if(h>=170&&h<200) return 'cyans'; if(h>=200&&h<260) return 'blues'; if(h>=260&&h<300) return 'purples'; if(h>=300&&h<345) return 'pinks'; return 'browns'; }
 
-  function matchCategory(hsl){
-    const {h,s,l} = hsl;
-    // Browns are often low-sat mid/dark yellows/oranges — test for them first
-    if(s < 0.6 && l < 0.65 && h >= 15 && h < 60) return 'browns';
-    if(s < 0.08 || l < 0.06 || l>0.94) return 'neutrals';
-    if(h >= 345 || h < 15) return 'reds';
-    if(h >=15 && h < 35) return 'oranges';
-    if(h >=35 && h < 70) return 'yellows';
-    if(h >=70 && h < 170) return 'greens';
-    if(h >=170 && h < 200) return 'cyans';
-    if(h >=200 && h < 260) return 'blues';
-    if(h >=260 && h < 300) return 'purples';
-    if(h >=300 && h < 345) return 'pinks';
-    return 'browns';
-  }
-
-  // initialize
+  // init
   buildPaletteUI(); buildCategoryButtons();
   pixelScaleVal.textContent = pixelScaleInput.value;
   displayScaleVal.textContent = displayScale.value;
   displayScaleInput.value = displayScale.value;
 
-  // drag & drop support
-  document.body.addEventListener('dragover', (e)=>{e.preventDefault();});
-  document.body.addEventListener('drop', (e)=>{e.preventDefault(); if(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]){ fileInput.files = e.dataTransfer.files; const ev = new Event('change'); fileInput.dispatchEvent(ev); }});
+  // drag & drop
+  document.body.addEventListener('dragover',(e)=>{e.preventDefault();});
+  document.body.addEventListener('drop',(e)=>{e.preventDefault(); if(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]){ fileInput.files = e.dataTransfer.files; const ev = new Event('change'); fileInput.dispatchEvent(ev); }});
+
+  // Worker function embedded
+  function workerFn(){
+    self.onmessage = function(e){
+      const msg = e.data; if(!msg || msg.type!=='process') return; const W=msg.width, H=msg.height; const srcBuf=new Uint8ClampedArray(msg.data); const method=msg.method; const palette = (msg.palette && msg.palette.length) ? msg.palette.map(p=>({r:p.r,g:p.g,b:p.b})) : null;
+      function nearestLocal(r,g,b){ let best=null, bd=Infinity; const list = palette || self.PALETTE_FALLBACK; for(const p of list){ const d=(p.r-r)*(p.r-r)+(p.g-g)*(p.g-g)+(p.b-b)*(p.b-b); if(d<bd){bd=d;best=p;} } return best; }
+      const ORDERED_BAYER_4=[[0,8,2,10],[12,4,14,6],[3,11,1,9],[15,7,13,5]];
+      function generateBayer(n){ if(n===1) return [[0]]; const half=n/2; const small=generateBayer(half); const res=Array.from({length:n}, ()=>Array(n).fill(0)); for(let y=0;y<half;y++) for(let x=0;x<half;x++){ const v=small[y][x]; res[y][x]=4*v; res[y][x+half]=4*v+2; res[y+half][x]=4*v+3; res[y+half][x+half]=4*v+1;} return res; }
+      const SIERRA_FULL=[{x:1,y:0,f:5/32},{x:2,y:0,f:3/32},{x:-2,y:1,f:2/32},{x:-1,y:1,f:4/32},{x:0,y:1,f:5/32},{x:1,y:1,f:4/32},{x:2,y:1,f:2/32},{x:-1,y:2,f:2/32},{x:0,y:2,f:3/32},{x:1,y:2,f:2/32}];
+      const SIERRA_3=[{x:1,y:0,f:4/16},{x:2,y:0,f:3/16},{x:-2,y:1,f:1/16},{x:-1,y:1,f:2/16},{x:0,y:1,f:3/16},{x:1,y:1,f:2/16},{x:2,y:1,f:1/16},{x:-1,y:2,f:1/16},{x:0,y:2,f:2/16},{x:1,y:2,f:1/16}];
+      const SIERRA_2=[{x:1,y:0,f:4/16},{x:2,y:0,f:3/16},{x:-1,y:1,f:1/16},{x:0,y:1,f:2/16},{x:1,y:1,f:1/16}];
+      const SIERRA_LITE=[{x:1,y:0,f:2/4},{x:-1,y:1,f:1/4},{x:0,y:1,f:1/4}];
+      const dstBuf=new Uint8ClampedArray(W*H*4);
+      if(method==='none'){ for(let i=0;i<srcBuf.length;i+=4){ const r=srcBuf[i],g=srcBuf[i+1],b=srcBuf[i+2]; const c=nearestLocal(r,g,b); dstBuf[i]=c.r; dstBuf[i+1]=c.g; dstBuf[i+2]=c.b; dstBuf[i+3]=255; } }
+      else if(method==='bayer2'||method==='bayer4'||method==='ordered'){ let matrix = method==='bayer2'?[[0,2],[3,1]]:method==='bayer4'?ORDERED_BAYER_4:generateBayer(8); const n=matrix.length, denom=n*n; for(let y=0;y<H;y++) for(let x=0;x<W;x++){ const idx=(y*W+x)*4; const r=srcBuf[idx],g=srcBuf[idx+1],b=srcBuf[idx+2]; const tval=(matrix[y%n][x%n]+0.5)/denom-0.5; const off=Math.round(tval*255); const nr=clamp(r+off,0,255), ng=clamp(g+off,0,255), nb=clamp(b+off,0,255); const c=nearestLocal(nr,ng,nb); dstBuf[idx]=c.r; dstBuf[idx+1]=c.g; dstBuf[idx+2]=c.b; dstBuf[idx+3]=255; } }
+      else if(method==='random'){ for(let i=0;i<srcBuf.length;i+=4){ const r=srcBuf[i],g=srcBuf[i+1],b=srcBuf[i+2]; const noise=(Math.random()-0.5)*64; const c=nearestLocal(clamp(Math.round(r+noise),0,255), clamp(Math.round(g+noise),0,255), clamp(Math.round(b+noise),0,255)); dstBuf[i]=c.r; dstBuf[i+1]=c.g; dstBuf[i+2]=c.b; dstBuf[i+3]=255; } }
+      else { let kernel; if(method==='floyd') kernel=[{x:1,y:0,f:7/16},{x:-1,y:1,f:3/16},{x:0,y:1,f:5/16},{x:1,y:1,f:1/16}]; else if(method==='burkes') kernel=[{x:1,y:0,f:8/32},{x:2,y:0,f:4/32},{x:-2,y:1,f:2/32},{x:-1,y:1,f:4/32},{x:0,y:1,f:8/32},{x:1,y:1,f:4/32},{x:2,y:1,f:2/32}]; else if(method==='jarvis') kernel=[{x:1,y:0,f:7/48},{x:2,y:0,f:5/48},{x:-2,y:1,f:3/48},{x:-1,y:1,f:5/48},{x:0,y:1,f:7/48},{x:1,y:1,f:5/48},{x:2,y:1,f:3/48},{x:-2,y:2,f:1/48},{x:-1,y:2,f:3/48},{x:0,y:2,f:5/48},{x:1,y:2,f:3/48},{x:2,y:2,f:1/48}]; else if(method==='stucki') kernel=[{x:1,y:0,f:8/42},{x:2,y:0,f:4/42},{x:-2,y:1,f:2/42},{x:-1,y:1,f:4/42},{x:0,y:1,f:8/42},{x:1,y:1,f:4/42},{x:2,y:1,f:2/42},{x:-2,y:2,f:1/42},{x:-1,y:2,f:2/42},{x:0,y:2,f:4/42},{x:1,y:2,f:2/42},{x:2,y:2,f:1/42}]; else if(method==='atkinson') kernel=[{x:1,y:0,f:1/8},{x:2,y:0,f:1/8},{x:-1,y:1,f:1/8},{x:0,y:1,f:1/8},{x:1,y:1,f:1/8},{x:0,y:2,f:1/8}]; else if(method==='sierra') kernel=SIERRA_FULL; else if(method==='sierra3') kernel=SIERRA_3; else if(method==='sierra2') kernel=SIERRA_2; else if(method==='sierralite') kernel=SIERRA_LITE; else kernel=[{x:1,y:0,f:7/16},{x:-1,y:1,f:3/16},{x:0,y:1,f:5/16},{x:1,y:1,f:1/16}]; const rbuf=new Float32Array(W*H), gbuf=new Float32Array(W*H), bbuf=new Float32Array(W*H); for(let y=0;y<H;y++) for(let x=0;x<W;x++){ const i=y*W+x; const idx=i*4; rbuf[i]=srcBuf[idx]; gbuf[i]=srcBuf[idx+1]; bbuf[i]=srcBuf[idx+2]; } for(let y=0;y<H;y++){ for(let x=0;x<W;x++){ const i=y*W+x; const oldR=rbuf[i], oldG=gbuf[i], oldB=bbuf[i]; const c=nearestLocal(Math.round(oldR), Math.round(oldG), Math.round(oldB)); dstBuf[i*4]=c.r; dstBuf[i*4+1]=c.g; dstBuf[i*4+2]=c.b; dstBuf[i*4+3]=255; const errR=oldR-c.r, errG=oldG-c.g, errB=oldB-c.b; for(const k of kernel){ const nx=x+k.x, ny=y+k.y; if(nx<0||ny<0||nx>=W||ny>=H) continue; const ni=ny*W+nx; rbuf[ni]+=errR*k.f; gbuf[ni]+=errG*k.f; bbuf[ni]+=errB*k.f; } } } }
+      // return buffer
+      self.postMessage({type:'result', width:W, height:H, data:dstBuf.buffer}, [dstBuf.buffer]);
+    };
+    function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+    self.PALETTE_FALLBACK=[{r:0,g:0,b:0},{r:255,g:255,b:255}];
+  }
 
 })();
 </script>
 </body>
 </html>
+
